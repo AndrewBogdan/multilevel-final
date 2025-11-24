@@ -1,22 +1,285 @@
 ---
-title: "Workspace"
+title: "Harvard EDU S043 Final Project - Exploratory Analysis"
+date: 2025-11-22
+author:
+  - name: Andrew Bogdan
+  - name: Lin Jin
+  - name: Livia Cheng
 format: html
-editor: visual
+execute:
+  # Use the knitr cache (https://quarto.org/docs/computations/caching.html#knitr-cache)
+  cache: true
 ---
 
 # Workspace
 
-Here we load the data. It's a little tricky.
+This is setting up to use a virtual environment. It should print something like "The library is already synchronized with the lockfile.".
 
-```{r eval=FALSE}
-#|label: load-from-ipums
+```{r}
+#| label: virtual-env
 
-if (!require("ipumsr")) stop("Reading IPUMS data into R requires the ipumsr package. It can be installed using the following command: install.packages('ipumsr')")
-
-ddi <- read_ipums_ddi("ddi.xml")
-data <- read_ipums_micro(ddi)
+renv::restore()
 ```
 
 ```{r}
-data
+#| label: libraries
+#| echo: false
+
+# Data Pliers; we use it for %>% and many other things
+# see https://dplyr.tidyverse.org/authors.html for citation
+library(dplyr)
+
+# Haven; data interoperability, especially labelled data.
+# see https://haven.tidyverse.org/authors.html for citation
+# library(haven)
 ```
+
+```{r}
+#| label: load-data
+
+data <- readRDS("data/ipums 2025-11-20.rds")
+nrow(data)  # We expect 325883
+```
+
+## Data
+
+### Data Cleaning
+
+Let's rename columns so that they're easier to use.
+
+```{r}
+#| label: rename-and-reorder
+
+names(data) <- tolower(names(data))
+
+# Manual renames; I'm using tidyselect::any_of to make this idempotent
+data <- data %>% rename(
+  mismatch = any_of("ocedrlp"),
+  survey_year = any_of("year"),
+  birth_year = any_of("biryr"),
+  minority = any_of("minrty"),
+  highest_degree = any_of("dgrdg"),
+  major = any_of("ndgmed"),
+  major_group = any_of("ndgmemg"),
+  recent_degree = any_of("mrdg"),  # categorical
+  
+  employment_status = any_of("lfstat"),  # categorical
+  weekly_hours = any_of("hrswkgr"),  # ordinal, nullable
+  job_type = any_of("nocpr"),  # categorical, nullable
+  job_type_group = any_of("nocprmg"),  # categorical, nullable
+  cpi_2009_conversion = any_of("cpi2009c"),  # continuous; multiply by salary to get 2009 dollars
+  
+  # Indicator varaibles
+  # These are all categorical and very nullable
+  reason_1_for_mismatch = any_of("nrrea"),
+  reason_2_for_mismatch = any_of("nrsec"),
+  reason_career_change = any_of("nrchg"),
+  reason_conditions = any_of("nrcon"),
+  reason_family = any_of("nrfam"),
+  reason_location = any_of("nrloc"),
+  reason_job_unavailable = any_of("nrocna"),
+  reason_pay = any_of("nrpay"),
+  reason_other = any_of("nrot"),
+  
+  satisfied_advancement = any_of("satadv"),
+  satisfied_benefits = any_of("satben"),
+  satisfied_challenge = any_of("satchal"),
+  satisfied_independence = any_of("satind"),
+  satisfied_location = any_of("satloc"),
+  satisfied_responsibility = any_of("satresp"),
+  satisfied_salary = any_of("satsal"),
+  satisfied_security = any_of("satsec"),
+  satisfied_contribution = any_of("satsoc"),
+  
+  technical_natural_science = any_of("mgrnat"),
+  technical_other = any_of("mgroth"),
+  technical_social_science = any_of("mgrsoc")
+)
+
+data <- data %>% relocate(
+  # Outcome
+  jobsatis,
+
+  # Meta
+  survey_year,
+  cpi_2009_conversion,
+  
+  # Groupers
+  personid,
+  
+  # Covariates
+  mismatch,
+  highest_degree,
+  recent_degree,
+  major,  # For highest degree, not recent
+  major_group,  # For highest degree, not recent
+  # missing: hg03y5, the year they graduated
+  salary,
+  employment_status,
+  weekly_hours,
+  job_type,
+  job_type_group,
+  
+  # Demographic
+  gender,
+  age,
+  birth_year,
+  minority,
+  raceth,
+  
+  # Secondary Outcomes/Covariates
+  reason_1_for_mismatch,
+  reason_2_for_mismatch,
+  
+  # Specific Indicators
+  # These are probably not useful because we have reason_1 and reason_2
+  reason_career_change,
+  reason_conditions,
+  reason_family,
+  reason_location,
+  reason_job_unavailable,
+  reason_pay,
+  reason_other,
+  
+  satisfied_advancement,
+  satisfied_benefits,
+  satisfied_challenge,
+  satisfied_independence,
+  satisfied_location,
+  satisfied_responsibility,
+  satisfied_salary,
+  satisfied_security,
+  satisfied_contribution,
+  
+  technical_natural_science,
+  technical_other,
+  technical_social_science,
+  
+  # Maybe unused
+  weight,  # Not sure what this is
+  cohort,  # First survey they took, not super interpretable
+  srvmode,  # How they took the survey; we could try to do something fancy
+  
+  # Unused
+  sample,  # See `survey_year`
+  refid,  # See `personid`
+  surid,  # Always 1 (NSCG)
+  seqnum,  # Used internally by IPUMS
+)
+
+names(data)
+```
+
+A lot of the data has codes for "missing", "skip" or something similar which are not actually expressed as NA. Here I change that.
+
+```{r}
+#| label: missing-data
+
+#' In a haven-labelled column, replace the values with the supplied label with
+#' a tagged NA.
+null_missing_codes <- function(column, label, tag) {
+  # Here I change the labels to keep legibility
+  attr(column, "labels")[label] <- haven::tagged_na(tag)
+  
+  # This won't work without the haven and dplyr functions, so I was explicit
+  dplyr::if_else(haven::as_factor(column) == label, haven::tagged_na(tag), column)
+}
+
+# Replace "logical skip", "missing", "blank", etc. with NA
+# Any column which is listed here has been inspected by me (Andrew)
+# haven::zap_missing doesn't work here because we're not using tagged NAs.
+data <- data %>% mutate(
+  # Outcome
+  jobsatis = null_missing_codes(jobsatis, label = "Logical Skip", tag = "s"),
+  # Main Covariate
+  mismatch = null_missing_codes(mismatch, label = "Logical Skip", tag = "s"),
+  # Other Covariates
+  salary = null_missing_codes(salary, label = "Logical Skip", tag = "s"),
+  weekly_hours = null_missing_codes(weekly_hours, label = "Logical Skip", tag = "s"),
+  job_type = null_missing_codes(job_type, label = "Logical Skip", tag = "s"),
+  job_type_group = null_missing_codes(job_type_group, label = "Logical Skip", tag = "s")
+)
+
+```
+
+The following columns did not have missing data: 
+
+- `highest_degree`, `major` 
+- `recent_degree` 
+- `survey_year` 
+- (demographic) `age`, `birth_year`, `gender`, `minority`, `raceth`.
+
+```{r}
+#| label: relabelling
+
+```
+
+### Details
+
+I've cleaned and inspected the following columns. Here's an explanation of each and any notes about using them.
+
+##### Outcomes
+
+-   `jobsatis`: (ordinal, primary outcome, int 1-4 where 1 is good) job satisfaction
+
+##### Groupers
+
+-   `personid`: a unique identifier (string) for each person
+
+##### Meta-Covariates
+
+-   `survey_year`: (ordinal, originally `YEAR`)
+
+##### Covariates
+
+-   `mismatch`: (ordinal, primary covariate, originally `OCEDRLP`, int 1-3 where 3 is unrelated) how related their job is to their topic of highest degree.
+-   `salary`: annual, and rounded to nearest thousand.
+    -   many of them are missing
+    -   a lot of them are too low (\$1000 a year?)
+    -   The scale maxes at \$150k, and many of them have saturated that scale.
+    -   People also tend to round to the nearest \$5k or \$10k.
+    -   Maybe we take a log of salary and make an indicator variable for 'saturated'?
+    -   Look into "tobit" modeling?
+-   `major` (categorical, originally `NDGMED`)
+    -   We also have `major_group` (originally `NDGMEMG`) which groups them coarser.
+-   `highest_degree`: (categorical, originally `DGRDG`).
+    -   We *cannot* code this as simply ordinal because #4 is a professional degree, which could be anywhere.
+
+##### Demographic Covariates
+
+-   `age`: (ranges from 23 to 75).
+-   `birth_year`: (originally `BIRYR`, rounded down to nearest 5)
+    -   Maybe we should center it (add 2.5)?
+-   `gender`: (binary)
+-   `minority`: (binary, originally `MINRTY`)
+    -   Corresponds exactly to the under-represented `raceth` below.
+-   `raceth`: Asian, white, under-represented, or other. "other" is not used.
+
+##### Unused
+
+-   `sample`: what survey they took; this is redundant in our dataset, as we are only using NSCG and we have the `survey_year` variable
+-   `refid`: the same data as `personid` but used internally by the data. They wanted to remove the letters for some reason.
+
+## Exploratory Data Analysis
+
+-   Weight is important
+
+```{r}
+nrow(data)
+
+
+data %>% filter(salary < 5000) %>% View
+```
+
+## Ideas
+
+For ordinal covariates, we could use monotone coding. It seems like it adds a paramater which allows the scales to be spaced differently apart. For example, it might transform a Likert Scale (0, 1, 2) onto (0, 1.2, 3.5) because it seems like 1-2 is a more extreme gap than 0-1.
+
+For linear-ish covariates which saturate (e.g. salary), we could use a tobit approach, which seems to add a parameter which estimates the chance of saturating. I'm not sure how it works.
+
+For the ordinal outcome, we should use ordinal regression.
+
+## Citations
+
+-   Wickham H, François R, Henry L, Müller K, Vaughan D (2025). dplyr: A Grammar of Data Manipulation. R package version 1.1.4, https://dplyr.tidyverse.org.
+-   Wickham H, Miller E, Smith D (2025). haven: Import and Export 'SPSS', 'Stata' and 'SAS' Files. R package version 2.5.5, https://haven.tidyverse.org.
