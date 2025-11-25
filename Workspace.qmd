@@ -5,7 +5,7 @@ author:
   - name: Andrew Bogdan
   - name: Lin Jin
   - name: Livia Cheng
-format: html
+format: pdf
 execute:
   # Use the knitr cache (https://quarto.org/docs/computations/caching.html#knitr-cache)
   cache: true
@@ -146,6 +146,8 @@ vars / sum(vars)
 ### Basic Model
 
 ```{r}
+#| label: lm-data-prep
+
 # Let's make our factors nicer
 lm_data <- data %>%
   mutate(
@@ -171,7 +173,12 @@ lm_data <- data %>%
       ":B" = "Bachelor's", ":M" = "Master's", ":Dr" = "Doctorate",
       ":Pr" = "Professional"
     ),
-    # salary = 
+    # Salary: we treat the top and bottom 7.5% of the scale (for reasons)
+    #  and then take a log2 centered around $60k, which is a round number close
+    #  to the median. We could do ln around $66k but that would be harder to read.
+    salary_scaled = replace_na(log2(ifelse(salary < 150000 & salary > 20000, salary, NA) / 60000), 0),
+    rich = salary == 150000,  # Upper end of the scale, 7.5% are saturated
+    poor = salary <= 20000,  # Bottom 7.5%; these data are anomalous
     # Our sample is mostly men (about 60%) so I'm setting them as the default
     gender = gender %>% as_factor() %>% fct_relevel("Male") %>%
       fct_recode(":M" = "Male", ":F" = "Female"),
@@ -181,13 +188,44 @@ lm_data <- data %>%
     race = race %>% as_factor() %>% fct_relevel("White") %>%
       fct_recode(":W" = "White", ":A" = "Asian", ":M" = "Under-represented minorities")
   )
+```
+
+```{r}
+#| label: full-model
 
 model <- lmer(
+  job_satis ~ 1 +
+    # mismatch +
+    reason +
+    highest_degree +
+    salary_scaled +
+    rich +
+    poor +
+    weekly_hours +
+    gender +
+    age +
+    race +
+    (1 | person_id) +  # Random intercept for each person
+    (1 | pair_id), # Random intercept for each major + job type pair
+  data = lm_data,
+  # It _almost_ converges with the defaults
+  control = lmerControl(optimizer = "bobyqa")
+  ) %>% 
+  cache("cache/model_full.rds", use_cache = TRUE)
+
+```
+
+```{r}
+#| label: 2013-model
+
+model2013 <- lmer(
   job_satis ~ 1 +
     mismatch +
     # reason +
     highest_degree +
-    # salary  # There are too many artifacts in this data to use it right now
+    salary_scaled +
+    rich +
+    poor +
     weekly_hours +
     gender +
     age +
@@ -195,27 +233,128 @@ model <- lmer(
     # (1 | person_id) +  # Random intercept for each person
     (1 | pair_id), # Random intercept for each major + job type pair
   data = lm_data %>% filter(survey_year == 2013)
-) # %>%
+)
+```
 
-tidy(model)
-# cache(
-#   cache_file = "cache/basic_model.rds",
-#   use_cache = TRUE
-# )
+### More Plots
 
-get_variance(model) / sum(get_variance(model))
+```{r}
+#| label: peek-salary
 
-get_variance(model)
+data %>%
+  mutate(salary_scaled = log2(ifelse(salary < 150000 & salary > 20000, salary, NA) / 60000)) %>%
+  select(salary_scaled) %>%
+  ggplot(aes(x = salary_scaled)) +
+  geom_histogram(bins = 30)
+
+```
+
+```{r}
+data.frame(
+  x = rep(1:5, each=5),
+  y = rep(1:5, times=5),
+  value = rnorm(25)
+  ) %>%
+  ggplot() +
+  geom_tile(aes(x, y, fill = value)) +
+  scale_fill_gradient(low="white", high="red")
 ```
 
 
 ```{r}
-#| label: salary
+#| label: residual-heatmap
 
-data %>%
-  ggplot(aes(x = salary)) +
-  geom_histogram(bins = 30)
+pair_residuals <- ranef(model2013)$pair_id %>%
+  rownames_to_column("pair_id") %>%
+  mutate(pair_id = as.integer(pair_id)) %>%
+  rename(residual = `(Intercept)`)
 
+heatmap_data <- data %>%
+  filter(survey_year == 2013) %>%
+  group_by(pair_id) %>%
+  select(job_type, major, mismatch, pair_id) %>%  # Do this first for speed
+  left_join(pair_residuals, by = "pair_id") %>%
+  mutate(
+    mismatch_prop = mean(mismatch == 1),
+    job_type = as_factor(job_type) %>% fct_recode(
+      "CS/M Prof" = "Postsecondary teachers-Computer and math sciences",
+      "CS/M" = "Computer scientists and mathematicians",
+      "BioMed Sci" = "Biological and medical scientists",
+      "Bio Prof" = "Postsecondary teachers-Life related sciences",
+      "Other Bio" = "Other life and related scientists",
+      "Chem" = "Chemists, except biochemists",
+      "Phys" = "Physicists and astronomers",
+      "Sci Prof" = "Postsecondary teachers-Physical and related sciences",
+      "Other Sci" = "Other physical and related scientists",
+      "Econ" = "Economists",
+      "Psych" = "Psychologists",
+      "Soc Prof" = "Postsecondary teachers-Social and related sciences",
+      "SocSci" = "Other social scientists",
+      "Other Eng" = "Other engineers",
+      "ChemE" = "Chemical engineers",
+      "CivE" = "Civil engineers",
+      "EE" = "Electrical or computer hardware engineers",
+      "MechE" = "Mechanical engineers",
+      "Eng Prof" = "Postsecondary teachers - engineering",
+      "Health" = "Health-related occupations",
+      "SciE Man" = "science and engineering managers",
+      "SciE Teach" = "Science and engineering pre-college teachers",
+      "SciE Teach2" = "Science and engineering pre-college teachers",
+      "Exec" = "Top and mid-level managers, executives, administrators",
+      "OtherMan" = "Other management related occupations",
+      "LibTeach" = "Non-science and engineering pre-college and post-secondary teachers",
+      "Other" = "Other Non-science and engineering occupations"
+      ),
+    major = as_factor(major) %>% fct_recode(
+      "CS/M" = "Computer and mathematical sciences",
+      "Bio" = "Biological sciences",
+      "LifeS" = "Other biological, agricultural, environmental life sciences",
+      "Chem" = "Chemistry, except biochemistry",
+      "Phys" = "Physics and astronomy",
+      "OtherSci" = "Other physical and related sciences",
+      "Econ" = "Economics",
+      "Poli" = "Political and related sciences",
+      "Psych" = "Psychology",
+      "Soc" = "Sociology and anthropology",
+      "OtherSoc" = "Other social sciences",
+      "ChemE" = "Chemical engineering",
+      "CivE" = "Civil engineering",
+      "EE" = "Electrical, electronics and communications engineering",
+      "MechE" = "Mechanical engineering",
+      "OtherE" = "Other engineering",
+      "Health" = "Health-related fields",
+      "OtherSci" = "Other science and engineering-related",
+      "Man" = "Management and administration",
+      "Non-STEM" = "Other non-science and engineering",
+      "X" = "Missing"
+    ),
+  ) %>%
+  add_count(name = "sample_size") %>%
+  slice(1) %>%
+  ungroup()
+  
+
+heatmap_data %>%
+  ggplot(aes(x = job_type, y = major)) +
+  geom_tile(aes(fill = residual)) +
+  scale_fill_gradient2(low = "red", high = "green", midpoint = 0) +
+  coord_fixed() +  # Make the pixels square
+  geom_point(aes(color = 1 - mismatch_prop)) +
+  scale_color_stepsn(
+    colors = c(alpha("white", 0), alpha("blue", 0.5)),
+    n.breaks = 6,
+    limits = c(0.1, 0.9)
+  ) +    # point colors
+  # geom_text(aes(label = sample_size)) +
+  labs(
+    x = "Job Type",
+    y = "Major (Highest Degree)",
+    title = "Group Residuals",
+    color = "%Match",
+    fill = "Job Satis."
+  ) +
+  # Rotate X text
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
 ## Ideas
