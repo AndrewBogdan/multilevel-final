@@ -27,13 +27,16 @@ renv::restore()
 
 # Tidyverse
 library(tidyverse)
-
 # Haven; data interoperability, especially labelled data.
-# library(haven)
+library(haven)
+# Lme4
+library(lme4)
 ```
 
 ```{r}
 #| label: load-data
+
+source("util.R")
 
 data <- readRDS("data/clean_data.rds")
 nrow(data)  # We expect 325883
@@ -42,42 +45,182 @@ nrow(data)  # We expect 325883
 ## Exploratory Data Analysis
 
 **To Do**
+1. Unconditional Random Intercept Model
+2. Conditional Random Intercept Model (with all covariates)
+3. Use these two models to generate plots
+  - We need to know if the models have to demonstrate clustering somehow.
+  - We can make a heatmap of each of our groups; 27 x 20.
+- We need to include average number of people per group
+  - Our groups have _wildly_ different numbers of people in them
+- How many people in the dataset? How many with `mismatch`?
 
-- Make a histogram of the distribution of the outcome.
-  - Maybe relate it to the primary covariate.
+There are 51834 datapoints in our sample which represent people without jobs.
+They are missing `job_satis`, `job_type`, and so on— these people are not useful
+to us, so we will drop them into space.
+  
+```{r}
+#| label: drop-bums
+
+data <- data %>% drop_na(job_satis)
+```
+
+Here's an idea: what if our groups are pairs of major and job type?
+
+```{r}
+#| label: make-pairs
+
+data <- data %>%
+  group_by(major, job_type) %>%
+  mutate(pair_id = cur_group_id()) %>%
+  ungroup()
+```
+
+### Plots
+Let's do a basic plot to see what the odds 
 
 ```{r}
 #| label: plot-satis-v-mismatch
 
-# We could use tidyr for this
+# Here we use the latest measurement for each person in our sample.
+# I think the dataset is so large that this decision doesn't really matter.
 data %>%
-  drop_na(job_satis) %>%
-  drop_na(mismatch) %>%
-  ggplot(aes(y = as_factor(mismatch), fill = as_factor(job_satis))) +
-  geom_bar(position = "fill")
+  filter(survey_year == 2013) %>%
+  ggplot(aes(x = as_factor(mismatch), fill = as_factor(job_satis))) +
+  geom_bar(position = "fill") +
+  labs(
+    x = "Percentage of Sample",
+    y = "Relationship between Job and Degree",
+    fill = "Job Satisfaction",
+    title = "Job Satisfaction by Mismatch (2013)"
+  ) + 
+  scale_y_continuous(labels = scales::percent_format())
   
 ```
 
-Let's try a basic model
-
 ```{r}
-#| label: unconditional-random-intercept
+data %>%
+  filter(survey_year == 2013) %>%
+  ggplot(aes(y = as_factor(reason_1_for_mismatch), fill = as_factor(job_satis))) +
+  geom_bar(position = "fill") +
+  labs(
+    x = "Reason",
+    y = "Percentage of Sample",
+    fill = "Job Satisfaction",
+    title = "Job Satisfaction by Reason"
+  ) + 
+  scale_x_continuous(labels = scales::percent_format())
 
-library(lme4)
-
-# TODO
 ```
 
+### ICC 
+
+Okay, let's take a look at the ICC.
+
 ```{r}
-#| label: ICC
+#| label: icc-pairs
+
+model <- cache(
+  expression = lmer(job_satis ~ (1 | person_id) + (1 | pair_id), data = data),
+  cache_file = "cache/pairs_unconditional_model.rds",
+  use_cache = TRUE
+)
+
+vars <- get_variance(model)
+vars / sum(vars)
+```
 
 
-# TODO
+```{r}
+#| label: icc-pairs-2013
+
+model <- cache(
+  expression = lmer(job_satis ~ (1 | pair_id), data = data %>% filter(survey_year == 2013)),
+  cache_file = "cache/unconditional_pairs_2013.rds",
+  use_cache = TRUE
+)
+
+vars <- get_variance(model)
+vars / sum(vars)
+```
+
+### Basic Model
+
+```{r}
+# Let's make our factors nicer
+lm_data <- data %>%
+  mutate(
+    job_satis = 4 - job_satis,
+    # I like the idea of using a monotone coding or something, but with
+    #  only three elements on the scale, I don't think it matters
+    mismatch = mismatch %>% as_factor() %>% fct_recode(
+      ":C" = "Closely related", ":S" = "Somewhat related", ":N" = "Not related"
+    ),
+    reason = reason_1_for_mismatch %>% as_factor() %>%
+      fct_relevel("Logical Skip") %>%
+      fct_recode(
+        ":Pay" = "Pay, promotion opportunities",
+        ":Conds" = "Working conditions",
+        ":Loc" = "Job location",
+        ":Change" = "Change in career or professional interests",
+        ":Fam" = "Family-related reasons",
+        ":Job" = "Job in highest degree field not available",
+        ":Other" = "Other reason for not working",
+        ":NA" = "Logical Skip"
+      ),
+    highest_degree = highest_degree %>% as_factor() %>% fct_recode(
+      ":B" = "Bachelor's", ":M" = "Master's", ":Dr" = "Doctorate",
+      ":Pr" = "Professional"
+    ),
+    # salary = 
+    # Our sample is mostly men (about 60%) so I'm setting them as the default
+    gender = gender %>% as_factor() %>% fct_relevel("Male") %>%
+      fct_recode(":M" = "Male", ":F" = "Female"),
+    # I'm centering this around 36 to 40 hours per week, as that's full time.
+    weekly_hours - 3,
+    # Our data is 65% white people
+    race = race %>% as_factor() %>% fct_relevel("White") %>%
+      fct_recode(":W" = "White", ":A" = "Asian", ":M" = "Under-represented minorities")
+  )
+
+model <- lmer(
+  job_satis ~ 1 +
+    mismatch +
+    # reason +
+    highest_degree +
+    # salary  # There are too many artifacts in this data to use it right now
+    weekly_hours +
+    gender +
+    age +
+    race +
+    # (1 | person_id) +  # Random intercept for each person
+    (1 | pair_id), # Random intercept for each major + job type pair
+  data = lm_data %>% filter(survey_year == 2013)
+) # %>%
+
+tidy(model)
+# cache(
+#   cache_file = "cache/basic_model.rds",
+#   use_cache = TRUE
+# )
+
+get_variance(model) / sum(get_variance(model))
+
+get_variance(model)
+```
+
+
+```{r}
+#| label: salary
+
+data %>%
+  ggplot(aes(x = salary)) +
+  geom_histogram(bins = 30)
+
 ```
 
 ## Ideas
 
-For ordinal covariates, we could use monotone coding. It seems like it adds a paramater which allows the scales to be spaced differently apart. For example, it might transform a Likert Scale (0, 1, 2) onto (0, 1.2, 3.5) because it seems like 1-2 is a more extreme gap than 0-1.
+For ordinal covariates, we could use monotone coding. It seems like it adds a parameter which allows the scales to be spaced differently apart. For example, it might transform a Likert Scale (0, 1, 2) onto (0, 1.2, 3.5) because it seems like 1-2 is a more extreme gap than 0-1.
 
 For linear-ish covariates which saturate (e.g. salary), we could use a tobit approach, which seems to add a parameter which estimates the chance of saturating. I'm not sure how it works.
 
@@ -90,7 +233,10 @@ For the ordinal outcome, we should use ordinal regression.
 #| exec: false
 
 citation("tidyverse")
+citation("lme4")
 ```
 
 - Wickham H, Averick M, Bryan J, Chang W, McGowan LD, François R, Grolemund G, Hayes A, Henry L, Hester J, Kuhn M, Pedersen TL, Miller E, Bache SM, Müller K, Ooms J, Robinson D, Seidel DP, Spinu V,
   Takahashi K, Vaughan D, Wilke C, Woo K, Yutani H (2019). “Welcome to the tidyverse.” _Journal of Open Source Software_, *4*(43), 1686. doi:10.21105/joss.01686 <https://doi.org/10.21105/joss.01686>.
+- Douglas Bates, Martin Maechler, Ben Bolker, Steve Walker (2015). Fitting Linear Mixed-Effects Models Using lme4. Journal of Statistical Software, 67(1), 1-48. doi:10.18637/jss.v067.i01.
+
