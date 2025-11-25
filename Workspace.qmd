@@ -25,12 +25,10 @@ renv::restore()
 #| label: libraries
 #| echo: false
 
-# Data Pliers; we use it for %>% and many other things
-# see https://dplyr.tidyverse.org/authors.html for citation
-library(dplyr)
+# Tidyverse
+library(tidyverse)
 
 # Haven; data interoperability, especially labelled data.
-# see https://haven.tidyverse.org/authors.html for citation
 # library(haven)
 ```
 
@@ -40,63 +38,41 @@ library(dplyr)
 data <- readRDS("data/clean_data.rds")
 nrow(data)  # We expect 325883
 ```
-## Notes about Data
-
-I've cleaned and inspected the following columns. Here's an explanation of each and any notes about using them.
-
-##### Outcomes
-
--   `jobsatis`: (ordinal, primary outcome, int 1-4 where 1 is good) job satisfaction
-
-##### Groupers
-
--   `personid`: a unique identifier (string) for each person
-
-##### Meta-Covariates
-
--   `survey_year`: (ordinal, originally `YEAR`)
-
-##### Covariates
-
--   `mismatch`: (ordinal, primary covariate, originally `OCEDRLP`, int 1-3 where 3 is unrelated) how related their job is to their topic of highest degree.
--   `salary`: annual, and rounded to nearest thousand.
-    -   many of them are missing
-    -   a lot of them are too low (\$1000 a year?)
-    -   The scale maxes at \$150k, and many of them have saturated that scale.
-    -   People also tend to round to the nearest \$5k or \$10k.
-    -   Maybe we take a log of salary and make an indicator variable for 'saturated'?
-    -   Look into "tobit" modeling?
--   `major` (categorical, originally `NDGMED`)
-    -   We also have `major_group` (originally `NDGMEMG`) which groups them coarser.
--   `highest_degree`: (categorical, originally `DGRDG`).
-    -   We *cannot* code this as simply ordinal because #4 is a professional degree, which could be anywhere.
-
-##### Demographic Covariates
-
--   `age`: (ranges from 23 to 75).
--   `birth_year`: (originally `BIRYR`, rounded down to nearest 5)
-    -   Maybe we should center it (add 2.5)?
--   `gender`: (binary)
--   `minority`: (binary, originally `MINRTY`)
-    -   Corresponds exactly to the under-represented `raceth` below.
--   `raceth`: Asian, white, under-represented, or other. "other" is not used.
-
-##### Unused
-
--   `sample`: what survey they took; this is redundant in our dataset, as we are only using NSCG and we have the `survey_year` variable
--   `refid`: the same data as `personid` but used internally by the data. They wanted to remove the letters for some reason.
 
 ## Exploratory Data Analysis
 
--   Weight is important
--   make a histogram of the outcome; maybe with the primary covariate on one axis even
-  - Treat it as continuous for now
+**To Do**
+
+- Make a histogram of the distribution of the outcome.
+  - Maybe relate it to the primary covariate.
 
 ```{r}
-nrow(data)
+#| label: plot-satis-v-mismatch
+
+# We could use tidyr for this
+data %>%
+  drop_na(job_satis) %>%
+  drop_na(mismatch) %>%
+  ggplot(aes(y = as_factor(mismatch), fill = as_factor(job_satis))) +
+  geom_bar(position = "fill")
+  
+```
+
+Let's try a basic model
+
+```{r}
+#| label: unconditional-random-intercept
+
+library(lme4)
+
+# TODO
+```
+
+```{r}
+#| label: ICC
 
 
-data %>% filter(salary < 5000) %>% View
+# TODO
 ```
 
 ## Ideas
@@ -109,5 +85,12 @@ For the ordinal outcome, we should use ordinal regression.
 
 ## Citations
 
--   Wickham H, François R, Henry L, Müller K, Vaughan D (2025). dplyr: A Grammar of Data Manipulation. R package version 1.1.4, https://dplyr.tidyverse.org.
--   Wickham H, Miller E, Smith D (2025). haven: Import and Export 'SPSS', 'Stata' and 'SAS' Files. R package version 2.5.5, https://haven.tidyverse.org.
+```{r}
+#| label: citations
+#| exec: false
+
+citation("tidyverse")
+```
+
+- Wickham H, Averick M, Bryan J, Chang W, McGowan LD, François R, Grolemund G, Hayes A, Henry L, Hester J, Kuhn M, Pedersen TL, Miller E, Bache SM, Müller K, Ooms J, Robinson D, Seidel DP, Spinu V,
+  Takahashi K, Vaughan D, Wilke C, Woo K, Yutani H (2019). “Welcome to the tidyverse.” _Journal of Open Source Software_, *4*(43), 1686. doi:10.21105/joss.01686 <https://doi.org/10.21105/joss.01686>.
