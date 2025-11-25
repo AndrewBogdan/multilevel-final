@@ -80,6 +80,7 @@ Let's do a basic plot to see what the odds
 
 ```{r}
 #| label: plot-satis-v-mismatch
+#| eval: false
 
 # Here we use the latest measurement for each person in our sample.
 # I think the dataset is so large that this decision doesn't really matter.
@@ -98,6 +99,9 @@ data %>%
 ```
 
 ```{r}
+#| label: plot-satis-v-reason
+#| eval: false
+
 data %>%
   filter(survey_year == 2013) %>%
   ggplot(aes(y = as_factor(reason_1_for_mismatch), fill = as_factor(job_satis))) +
@@ -118,6 +122,7 @@ Okay, let's take a look at the ICC.
 
 ```{r}
 #| label: icc-pairs
+#| eval: false
 
 model <- cache(
   expression = lmer(job_satis ~ (1 | person_id) + (1 | pair_id), data = data),
@@ -125,13 +130,13 @@ model <- cache(
   use_cache = TRUE
 )
 
-vars <- get_variance(model)
-vars / sum(vars)
+get_variance(model) / sum(get_variance(model))
 ```
 
 
 ```{r}
 #| label: icc-pairs-2013
+#| eval: false
 
 model <- cache(
   expression = lmer(job_satis ~ (1 | pair_id), data = data %>% filter(survey_year == 2013)),
@@ -176,14 +181,25 @@ lm_data <- data %>%
     # Salary: we treat the top and bottom 7.5% of the scale (for reasons)
     #  and then take a log2 centered around $60k, which is a round number close
     #  to the median. We could do ln around $66k but that would be harder to read.
-    salary_scaled = replace_na(log2(ifelse(salary < 150000 & salary > 20000, salary, NA) / 60000), 0),
-    rich = salary == 150000,  # Upper end of the scale, 7.5% are saturated
-    poor = salary <= 20000,  # Bottom 7.5%; these data are anomalous
+    # We have to do the CPI conversion _after_ the cutoffs, as one cutoff is 
+    #  the saturation of the scale. I don't _like_ this, but I can't think of
+    #  much better.
+    salary_adj = ifelse(
+      test = salary < 150000 & salary > 20000, 
+      yes = log2(salary * cpi_2009_conversion / 60000),
+      no = 0  # We have to code this as zero or else a matrix is singular.
+    ),
+    rich = salary == 150000, # Upper end of the scale, 7.5% are saturated
+    poor = salary <= 20000, # Bottom 7.5%; these data are anomalous
+    # I'm centering this around 36 to 40 hours per week, as that's full time.
+    weekly_hours - 3,
+    # We adjusted salaries to 2009, so let's adjust year to that too.
+    year = survey_year - 2009,
     # Our sample is mostly men (about 60%) so I'm setting them as the default
     gender = gender %>% as_factor() %>% fct_relevel("Male") %>%
       fct_recode(":M" = "Male", ":F" = "Female"),
-    # I'm centering this around 36 to 40 hours per week, as that's full time.
-    weekly_hours - 3,
+    # Center around 25 (my age) and divide by 10 (decades, for scaling)
+    age = (age - 25) / 10,
     # Our data is 65% white people
     race = race %>% as_factor() %>% fct_relevel("White") %>%
       fct_recode(":W" = "White", ":A" = "Asian", ":M" = "Under-represented minorities")
@@ -192,31 +208,45 @@ lm_data <- data %>%
 
 ```{r}
 #| label: full-model
+#| eval: false
 
 model <- lmer(
   job_satis ~ 1 +
     # mismatch +
     reason +
     highest_degree +
-    salary_scaled +
+    salary_adj +
     rich +
     poor +
-    weekly_hours +
+    weekly_hours +  # Around 36 to 40 hrs/week
+    year +  # Around 2009
     gender +
+    # It might make more sense to do survey_year and birth_year, as 
+    #  age = birth_year + survey_year roughly, and that's kind of a pain.
     age +
     race +
     (1 | person_id) +  # Random intercept for each person
-    (1 | pair_id), # Random intercept for each major + job type pair
+    (1 | major) + 
+    (1 | job_type),
+    # I don't think this was a good idea.
+    # (1 | pair_id), # Random intercept for each major + job type pair
   data = lm_data,
   # It _almost_ converges with the defaults
   control = lmerControl(optimizer = "bobyqa")
   ) %>% 
-  cache("cache/model_full.rds", use_cache = TRUE)
+  cache("cache/model_full.rds", use_cache = FALSE)
+
+stats <- tidy(model) %>%
+  left_join(
+    confint(model, level=0.99, method="Wald") %>% as_tibble(rownames = "term"),
+    by = "term"
+  )
 
 ```
 
 ```{r}
 #| label: 2013-model
+#| eval: false
 
 model2013 <- lmer(
   job_satis ~ 1 +
@@ -236,14 +266,50 @@ model2013 <- lmer(
 )
 ```
 
+```{r}
+#| label: clmm-model
+
+cl_data <- lm_data %>%
+  mutate(
+    job_satis = as_factor(job_satis),
+  )
+
+cl_model <- ordinal::clmm(
+  job_satis ~ 1 +
+    # mismatch +
+    reason +
+    highest_degree +
+    # salary_adj +
+    rich +
+    poor +
+    weekly_hours +  # Around 36 to 40 hrs/week
+    # year +  # Around 2009
+    gender +
+    age +
+    race +
+    (1 | person_id),  # Random intercept for each person
+    # (1 | major) + 
+    # (1 | job_type),
+  data = cl_data %>% sample_n(5000),
+  link = "logit",
+  ) %>% 
+  cache("cache/model_full.rds", use_cache = FALSE)
+
+
+cl_stats <- tidy(cl_model) %>%
+  left_join(
+    confint(cl_model, level=0.99, method="Wald") %>% as_tibble(rownames = "term"),
+    by = "term"
+  )
+```
+
 ### More Plots
 
 ```{r}
 #| label: peek-salary
 
-data %>%
-  mutate(salary_scaled = log2(ifelse(salary < 150000 & salary > 20000, salary, NA) / 60000)) %>%
-  select(salary_scaled) %>%
+lm_data %>%
+  mutate(salary_scaled=ifelse(salary_scaled == 0, NA, salary_scaled)) %>%
   ggplot(aes(x = salary_scaled)) +
   geom_histogram(bins = 30)
 
