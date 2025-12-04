@@ -1,0 +1,223 @@
+---
+title: "Harvard EDU S043 Final Project - Plots"
+date: 2025-11-22
+author:
+  - name: Andrew Bogdan
+  - name: Lin Jin
+  - name: Livia Cheng
+format: pdf
+execute:
+  # Use the knitr cache (https://quarto.org/docs/computations/caching.html#knitr-cache)
+  cache: true
+---
+
+```{r}
+#| label: load-data
+
+# Tidyverse
+library(tidyverse)
+# Haven; data interoperability, especially labelled data.
+library(haven)
+# Lme4
+library(lme4)
+
+source("util.R")
+
+
+data <- readRDS("data/clean_data.rds")
+nrow(data)  # We expect 325883
+```
+
+Okay so we need a plot. A plot of what, though?
+
+We should plot mismatch vs. job satisfaction; predicted and observed.
+
+We can use this as a sensitivity analysis, depending on how many we have.
+
+- Question: what's our average residual?
+
+
+```{r}
+#| label: load-and-predict
+data <- readRDS("data-lm-read.rds") %>%
+  mutate(
+    major_group = factor(gsub("^:", "", as.character(major_group))),
+    job_type_group = factor(gsub("^:", "", as.character(job_type_group)))
+  )
+```
+
+
+
+```{r}
+model5 <- readRDS("cache/model5.rds")
+reason_model <- readRDS("cache/reason_model.rds")
+main_model <- readRDS("cache/main_model.rds")
+
+data <- data %>%
+  mutate(
+    # pred_model5 = predict(model5, data),
+    # reason_pred = predict(reason_model, data)
+    pred = predict(main_model, data)
+  ) %>%
+  relocate(starts_with("pred"), .after = mismatch)
+```
+
+```{r}
+sqrt(mean((data$pred - data$job_satis) ** 2))
+```
+
+We need to somehow express something visually which uses mutli-level models !!
+
+- make it very clear
+- how are we showing variance in our model
+- easiest: don't have them look at the technical report
+
+
+## Plot Salary (x) v. Job Satis (y) v. Mismatch (f) 
+
+facet per mismatch
+salary on the x
+job satisfaction on the y 
+color/line is major or job type
+scatter a few measurements or predictions in there
+
+mismatch:salary
+it would be cool to plot even
+
+to plot a line with salary on x, it has to be a salary slope
+- (1 + salary | job or major )
+
+```{r}
+binned <- data %>% 
+  mutate(age_bin = cut(age, breaks = seq(0, max(age), by = 1), right = FALSE)) %>%
+  drop_na(age_bin) %>%
+  mutate(
+    age_bin = droplevels(age_bin),
+    mismatch = fct_relevel(mismatch, "close")
+  )
+
+levels(binned$age_bin) <- c(
+  "15–24",   # first bin
+  "25–34",   # second bin
+  "35–44",   # etc.
+  "45–54",
+  "55–64"
+)
+
+binned %>% 
+  filter(salary_adj != 0) %>%
+  slice_sample(n = 1000, by = mismatch) %>%
+  ggplot(aes(x = salary_adj, y = pred)) +
+  geom_point(size = 0.5, alpha = 0.5) + 
+  geom_smooth(data = binned, aes(color = age_bin), method = "lm") +
+  facet_wrap(~mismatch) +
+  scale_x_continuous(
+    breaks = c(-1, 0, 1),
+    labels = c("$30k", "$60k", "$120k")
+  ) +
+  labs(
+    x = "Salary (2009 $USD)",
+    y = "Job Satisfaction (Likert 0–3)",
+    title = "Predicted Satisfaction by Mismatch, Salary, and Age",
+    color = "Age"
+  )
+
+```
+
+```{r}
+#| label: bot-code
+#| 
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# Make a grid for prediction
+pred_grid <- expand.grid(
+  salary_adj = seq(min(data$salary_adj), max(data$salary_adj), length.out = 100),
+  age = c(25, 45, 65),
+  mismatch = c("C", "S", "N")
+)
+
+pred_grid <- pred_grid %>%
+  mutate(
+    highest_degree = ":B",   # reference category
+    weekly_hours = mean(data$weekly_hours, na.rm=TRUE),
+    rich = FALSE,
+    poor = FALSE,
+    gender = FALSE,
+    race = ":W",             # reference race
+    survey_year = mean(data$survey_year, na.rm=TRUE),
+    major = data$major[1],
+    job_type = data$job_type[1],
+    person_id = data$person_id[1]
+  )
+
+pred_grid$pred <- predict(main_model, newdata = pred_grid, re.form = NA)  # fixed effects only
+
+ggplot() +
+  # Observed density as scatter-like
+  geom_density_2d(data = data, aes(x = salary_adj, y = job_satis), alpha = 0.3) +
+  # Predicted lines
+  # geom_line(data = pred_grid, aes(x = salary_adj, y = pred, color = factor(age)), size = 1.2) +
+  facet_wrap(~mismatch) +
+  # scale_color_manual(values = c("25"="blue","45"="green","65"="red")) +
+  labs(
+    x = "Salary Adjusted",
+    y = "Job Satisfaction",
+    color = "Age"
+  ) +
+  coord_cartesian(ylim = c(-0.5, 3.5)) +
+  theme_minimal()
+```
+
+## Plot: Job + Major Effects
+
+```{r}
+
+effects <- ranef(main_model) %>% cache("cache/main_model_ranef.rds", use_cache=TRUE)
+coefs = see(main_model)
+
+main_intercept = coefs %>% filter(term == "(Intercept)") %>% getElement("estimate")
+# major_corr = coefs %>% filter(term == "cor__(Intercept).salary_adj") %>% getElement("estimate")
+# job_corr = coefs %>% filter(term == "(Intercept)") %>% getElement("estimate")
+
+job_effects <- effects$job_type %>%
+  as_tibble(rownames="name") %>%
+  rename(intercept = "(Intercept)", slope = "salary_adj") %>%
+  mutate(
+    name = gsub("^:", "", name),
+    type = "Jobs",
+    intercept = intercept + main_intercept
+  )
+
+major_effects <- effects$major %>%
+  as_tibble(rownames="name") %>%
+  rename(intercept = "(Intercept)", slope = "salary_adj") %>%
+  mutate(
+    name = gsub("^:", "", name),
+    type = "Majors",
+    intercept = intercept + main_intercept
+  )
+
+vis_effects = bind_rows(job_effects, major_effects) %>%
+  mutate(type = factor(type))
+
+library(ggrepel)
+
+vis_effects %>%
+  ggplot(aes(x = intercept, y = slope, color = type)) +
+  geom_smooth(method = "lm", se = FALSE, size = 0.7) +
+  geom_point() +
+  annotate("text", x = 2.52, y = -0.028, label = "ρ = -0.478") + 
+  annotate("text", x = 2.48, y = 0.012, label = "ρ = 0.334") +
+  geom_text_repel(aes(fill = type, label = name), box.padding = 0.2, max.overlaps = Inf) +
+  labs(
+    x = "Intercept / Average Satisfaction (Likert 0-3)",
+    y = "Slope / Increase in Satisfaction (Likert 0-3) per Doubling Salary",
+    title = "Satisfaction Slope/Intercept Relationship for Major and Job Type",
+    color = "Key"
+  ) +
+  theme_minimal()
+```
+
+

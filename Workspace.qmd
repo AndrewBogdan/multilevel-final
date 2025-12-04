@@ -124,11 +124,7 @@ Okay, let's take a look at the ICC.
 #| label: icc-pairs
 #| eval: false
 
-model <- cache(
-  expression = lmer(job_satis ~ (1 | person_id) + (1 | pair_id), data = data),
-  cache_file = "cache/pairs_unconditional_model.rds",
-  use_cache = TRUE
-)
+model <-  lmer(job_satis ~ (1 | pair_id), data = data)
 
 get_variance(model) / sum(get_variance(model))
 ```
@@ -139,7 +135,7 @@ get_variance(model) / sum(get_variance(model))
 #| eval: false
 
 model <- cache(
-  expression = lmer(job_satis ~ (1 | pair_id), data = data %>% filter(survey_year == 2013)),
+  expression = lmer(job_satis ~ (1 | major) + (1 | job_type), data = data %>% filter(survey_year == 2013)),
   cache_file = "cache/unconditional_pairs_2013.rds",
   use_cache = TRUE
 )
@@ -194,7 +190,8 @@ lm_data <- data %>%
     # I'm centering this around 36 to 40 hours per week, as that's full time.
     weekly_hours - 3,
     # We adjusted salaries to 2009, so let's adjust year to that too.
-    year = survey_year - 2009,
+    # Nevermind, we don't have 2009 in the data, let's do the most recent one.
+    year = survey_year - 2013,
     # Our sample is mostly men (about 60%) so I'm setting them as the default
     gender = gender %>% as_factor() %>% fct_relevel("Male") %>%
       fct_recode(":M" = "Male", ":F" = "Female"),
@@ -225,18 +222,18 @@ model <- lmer(
     #  age = birth_year + survey_year roughly, and that's kind of a pain.
     age +
     race +
-    (1 | person_id) +  # Random intercept for each person
-    (1 | major) + 
-    (1 | job_type),
+    (1 | person_id), # Random intercept for each person
+    # (1 | major) + 
+    # (1 | job_type),
     # I don't think this was a good idea.
     # (1 | pair_id), # Random intercept for each major + job type pair
   data = lm_data,
   # It _almost_ converges with the defaults
   control = lmerControl(optimizer = "bobyqa")
-  ) %>% 
+  ) %>%
   cache("cache/model_full.rds", use_cache = FALSE)
 
-stats <- tidy(model) %>%
+stats <- broom.mixed::tidy(model) %>%
   left_join(
     confint(model, level=0.99, method="Wald") %>% as_tibble(rownames = "term"),
     by = "term"
@@ -292,15 +289,11 @@ cl_model <- ordinal::clmm(
     # (1 | job_type),
   data = cl_data %>% sample_n(5000),
   link = "logit",
-  ) %>% 
-  cache("cache/model_full.rds", use_cache = FALSE)
+  ) # %>% 
+  # cache("cache/model_clmm.rds", use_cache = FALSE)
 
 
-cl_stats <- tidy(cl_model) %>%
-  left_join(
-    confint(cl_model, level=0.99, method="Wald") %>% as_tibble(rownames = "term"),
-    by = "term"
-  )
+
 ```
 
 ### More Plots

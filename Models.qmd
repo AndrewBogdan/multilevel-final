@@ -1,0 +1,845 @@
+---
+title: "Harvard EDU S043 Final Project - Models"
+date: 2025-11-22
+author:
+  - name: Andrew Bogdan
+  - name: Lin Jin
+  - name: Livia Cheng
+format: pdf
+execute:
+  # Use the knitr cache (https://quarto.org/docs/computations/caching.html#knitr-cache)
+  cache: true
+---
+
+```{r}
+#| label: libraries
+#| echo: false
+
+# Tidyverse
+library(tidyverse)
+# Haven; data interoperability, especially labelled data.
+library(haven)
+# Lme4
+library(lme4)
+```
+
+```{r}
+#| label: util
+
+source("util.R")
+```
+
+### Load Data
+```{r}
+#| label: load-data
+
+data <- readRDS("data/clean_data.rds") %>%
+  drop_na(job_satis) %>%
+  filter(add_count(., person_id)$n > 1) %>%
+  mutate(
+    job_satis = 4 - job_satis,
+    # I like the idea of using a monotone coding or something, but with
+    #  only three elements on the scale, I don't think it matters
+    mismatch = mismatch %>% as_factor() %>% fct_recode(
+      ":C" = "Closely related", ":S" = "Somewhat related", ":N" = "Not related"
+    ),
+    reason = reason_1_for_mismatch %>% as_factor() %>%
+      fct_relevel("Logical Skip") %>%
+      fct_recode(
+        ":Pay" = "Pay, promotion opportunities",
+        ":Conds" = "Working conditions",
+        ":Loc" = "Job location",
+        ":Change" = "Change in career or professional interests",
+        ":Fam" = "Family-related reasons",
+        ":Job" = "Job in highest degree field not available",
+        ":Other" = "Other reason for not working",
+        ":NA" = "Logical Skip"
+      ),
+    job_type = as_factor(job_type) %>% fct_recode(
+      ":CS/M Prof" = "Postsecondary teachers-Computer and math sciences",
+      ":CS/M" = "Computer scientists and mathematicians",
+      ":BioMed Sci" = "Biological and medical scientists",
+      ":Bio Prof" = "Postsecondary teachers-Life related sciences",
+      ":Other Bio" = "Other life and related scientists",
+      ":Chem" = "Chemists, except biochemists",
+      ":Phys" = "Physicists and astronomers",
+      ":Sci Prof" = "Postsecondary teachers-Physical and related sciences",
+      ":Other Sci" = "Other physical and related scientists",
+      ":Econ" = "Economists",
+      ":Psych" = "Psychologists",
+      ":Soc Prof" = "Postsecondary teachers-Social and related sciences",
+      ":SocSci" = "Other social scientists",
+      ":Other Eng" = "Other engineers",
+      ":ChemE" = "Chemical engineers",
+      ":CivE" = "Civil engineers",
+      ":EE" = "Electrical or computer hardware engineers",
+      ":MechE" = "Mechanical engineers",
+      ":Eng Prof" = "Postsecondary teachers - engineering",
+      ":Health" = "Health-related occupations",
+      ":SciE Man" = "science and engineering managers",
+      ":SciE Teach" = "Science and engineering pre-college teachers",
+      ":SciE Teach2" = "Science and engineering pre-college teachers",
+      ":Exec" = "Top and mid-level managers, executives, administrators",
+      ":OtherMan" = "Other management related occupations",
+      ":LibTeach" = "Non-science and engineering pre-college and post-secondary teachers",
+      ":Other" = "Other Non-science and engineering occupations"
+    ),
+    job_type_group = as_factor(job_type_group) %>% 
+      fct_relevel("Non-science and engineering occupations") %>%
+      fct_recode(
+        ":CS/M" = "Computer and mathematical scientists",
+        ":LifeSci" = "Biological, agricultural and other life scientists",
+        ":PhysSci" = "Physical and related scientists",
+        ":SocSci" = "Social and related scientists",
+        ":Eng" = "Engineers",
+        ":STEM-adj" = "Science and engineering related occupations",
+        ":Non-STEM" = "Non-science and engineering occupations",
+        ":X" = "Logical Skip"
+      ),
+    major = as_factor(major) %>% fct_recode(
+      ":CS/M" = "Computer and mathematical sciences",
+      ":Bio" = "Biological sciences",
+      ":LifeS" = "Other biological, agricultural, environmental life sciences",
+      ":Chem" = "Chemistry, except biochemistry",
+      ":Phys" = "Physics and astronomy",
+      ":OtherSci" = "Other physical and related sciences",
+      ":Econ" = "Economics",
+      ":Poli" = "Political and related sciences",
+      ":Psych" = "Psychology",
+      ":Soc" = "Sociology and anthropology",
+      ":OtherSoc" = "Other social sciences",
+      ":ChemE" = "Chemical engineering",
+      ":CivE" = "Civil engineering",
+      ":EE" = "Electrical, electronics and communications engineering",
+      ":MechE" = "Mechanical engineering",
+      ":OtherE" = "Other engineering",
+      ":Health" = "Health-related fields",
+      ":OtherSci" = "Other science and engineering-related",
+      ":Man" = "Management and administration",
+      ":Non-STEM" = "Other non-science and engineering",
+      ":X" = "Missing"
+    ),
+    major_group = as_factor(major_group) %>% 
+      fct_relevel("Non-science and engineering fields") %>%
+      fct_recode(
+        ":CS/M" = "Computer and mathematical sciences",
+        ":LifeSci" = "Biological, agricultural and environmental life sciences",
+        ":PhysSci" = "Physical and related sciences",
+        ":SocSci" = "Social and related sciences",
+        ":Eng" = "Engineering",
+        ":STEM-adj" = "Science and engineering-related fields",
+        ":Non-STEM" = "Non-science and engineering fields",
+        ":X" = "Missing"
+      ),
+    highest_degree = highest_degree %>% as_factor() %>% fct_recode(
+      ":B" = "Bachelor's", ":M" = "Master's", ":Dr" = "Doctorate",
+      ":Pr" = "Professional"
+    ),
+    # Salary: we treat the top and bottom 7.5% of the scale (for reasons)
+    #  and then take a log2 centered around $60k, which is a round number close
+    #  to the median. We could do ln around $66k but that would be harder to read.
+    # We have to do the CPI conversion _after_ the cutoffs, as one cutoff is 
+    #  the saturation of the scale. I don't _like_ this, but I can't think of
+    #  much better.
+    salary_adj = ifelse(
+      test = salary < 150000 & salary > 20000, 
+      yes = log2(salary * cpi_2009_conversion / 60000),
+      no = 0  # We have to code this as zero or else a matrix is singular.
+    ),
+    rich = salary == 150000, # Upper end of the scale, 7.5% are saturated
+    poor = salary <= 20000, # Bottom 7.5%; these data are anomalous
+    # I'm centering this around 36 to 40 hours per week, as that's full time.
+    weekly_hours = weekly_hours - 3,
+    # We adjusted salaries to 2009, so let's adjust year to that too.
+    # Nevermind, we don't have 2009 in the data, let's do the most recent one.
+    survey_year = survey_year - 2013,
+    # Our sample is mostly men (about 60%) so I'm setting them as the default
+    gender = gender %>% as_factor() %>% fct_relevel("Male") %>%
+      fct_recode(":M" = "Male", ":F" = "Female"),
+    # Center around 25 (my age) and divide by 10 (decades, for scaling)
+    age = (age - 25) / 10,
+    # Our data is 65% white people
+    race = race %>% as_factor() %>% fct_relevel("White") %>%
+      fct_recode(":W" = "White", ":A" = "Asian", ":M" = "Under-represented minorities")
+  ) %>%
+  cache("data-lm-read.rds", use_cache = TRUE)
+```
+
+## Baseline
+
+- how many respondents
+- how many responded n times
+- baseline characteristics (mean and % for each if applicable)
+- job satis mean & stdev
+
+```{r}
+#| label: sample-size
+
+data_unfiltered = readRDS("data/clean_data.rds")
+
+# Raw Sample Size
+nrow(data_unfiltered)
+
+nrow(data_unfiltered %>% drop_na(job_satis))
+
+nrow(data)
+```
+
+```{r}
+#| label: baseline-characteristics
+
+
+count(data, survey_year)
+```
+
+```{r}
+#| label: baseline-measurements
+
+salary_baseline = lmer(
+  salary_adj ~ 1 +
+    # Main covariate
+    # mismatch +
+    # Education covariates
+    highest_degree +
+    major_group +
+    # Job covariates
+    job_type_group +
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id), # Random intercept for each person
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+) %>% cache("cache/salary.rds", use_cache = FALSE)
+
+salary_baseline_mixef <- lmer(
+  salary_adj ~ 1 +
+    # Main covariate
+    # mismatch +
+    # Education covariates
+    highest_degree +
+    # major_group +
+    # Job covariates
+    # job_type_group +
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id) + (1 | major) + (1 | job_type), # Random intercept for each person
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+) %>% cache("cache/salary_baseline_mixef.rds", use_cache = FALSE)
+
+salary_job_test <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    salary_adj +
+    (1 + salary_adj | job_type), # Random intercept for each person
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+) %>% cache("cache/salary_job_test.rds", use_cache = FALSE)
+
+```
+
+```{r}
+library(ggplot2)
+library(lme4)
+library(dplyr)
+
+# Assume 'fit' is your lmer object, 'data' is your dataframe
+
+# 1️⃣ Fitted vs Observed
+data <- data %>%
+  mutate(fitted = predict(salary_job_test))
+
+ggplot(data, aes(x = fitted, y = job_satis)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "lm", color = "red") +
+  labs(x = "Fitted values", y = "Observed job satisfaction")
+
+# 2️⃣ Residuals plot
+data <- data %>%
+  mutate(resid = residuals(salary_job_test))
+
+ggplot(data, aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(x = "Fitted values", y = "Residuals")
+
+# 3️⃣ Random effects (intercept and slope per job_type)
+re <- ranef(salary_job_test)$job_type
+re$job_type <- rownames(re)
+ggplot(re, aes(x = `(Intercept)`, y = salary_adj, label = job_type)) +
+  geom_point() +
+  geom_text(nudge_y = 0.01, size = 3) +
+  labs(x = "Random intercept", y = "Random slope for salary_adj")
+```
+
+```{r}
+
+```
+
+## Model 1: ANOVA, Fixed Effects
+
+```{r}
+#| label: nested-model
+
+# Just the main covariate and grouping
+model1 <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Grouping
+    (1 | person_id), # Random intercept for each person
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+) %>% cache("cache/model1.rds", use_cache = TRUE)
+
+# Job covariates
+model2 <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Job covariates
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +  # Log2, centered @ $60k, 2009 dollars
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    (1 | person_id), # Random intercept for each person
+  data = data,
+  # It _almost_ converges with the defaults
+  control = lmerControl(optimizer = "bobyqa")
+) %>% cache("cache/model2.rds", use_cache = TRUE)
+
+# Added demographic covariates
+model3 <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Job covariates
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +  # Log2, centered @ $60k, 2009 dollars
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id), # Random intercept for each person
+  data = data,
+  # It _almost_ converges with the defaults
+  control = lmerControl(optimizer = "bobyqa")
+) %>% cache("cache/model3.rds", use_cache = TRUE)
+
+# Adding education covariates
+model35 <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Education covariates
+    highest_degree +
+    # Job covariates
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +  # Log2, centered @ $60k, 2009 dollars
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id), # Random intercept for each person
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+) %>% cache("cache/model35.rds", use_cache = TRUE)
+
+# Added job type
+model4 <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Job covariates
+    job_type_group +
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +  # Log2, centered @ $60k, 2009 dollars
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id), # Random intercept for each person
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+) %>% cache("cache/model4.rds", use_cache = TRUE)
+
+# Added education covariates
+model5 <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Education covariates
+    highest_degree +
+    major_group +
+    # Job covariates
+    job_type_group +
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +  # Log2, centered @ $60k, 2009 dollars
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id), # Random intercept for each person
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+) %>% cache("cache/model5.rds", use_cache = TRUE)
+
+see(model5) %>% write_csv("model5.csv")
+```
+
+```{r}
+#|label: anova
+
+anova(model1, model2, model3, model4, model5)
+```
+
+### Modeling Age 
+```{r}
+model_age <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    # mismatch +
+    # Education covariates
+    # highest_degree +
+    # major_group +
+    # Job covariates
+    # job_type_group +
+    # weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    # salary_adj +  # Log2, centered @ $60k, 2009 dollars
+    # rich +  # Top 7.5% / $150k salary
+    # poor +  # Bottom 7.5%
+    # Demographic
+    # gender +
+    # age +  # Decades around 25 years
+    # race +
+    # survey_year +  # Centered around 2013
+    (1 + age | person_id), # Random intercept for each person
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+see(model_age)
+```
+
+### Check Survey Year
+
+```{r}
+#| label: check-survey-year
+
+model_no_survey_year = lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Education covariates
+    highest_degree +
+    major_group +
+    # Job covariates
+    job_type_group +
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +  # Log2, centered @ $60k, 2009 dollars
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    (1 | person_id), # Random intercept for each person
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+) %>% cache("cache/model_no_survey_year", use_cache = TRUE)
+
+anova(model_no_survey_year, model5)
+```
+
+
+## Model 2: Reasons
+```{r}
+#| label: reason-model
+ 
+reason_model <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    reason +
+    # Education covariates
+    highest_degree +
+    major_group +
+    # Job covariates
+    job_type_group +
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +  # Log2, centered @ $60k, 2009 dollars
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id), # Random intercept for each person
+  data = data,
+  # It _almost_ converges with the defaults
+  control = lmerControl(optimizer = "bobyqa")
+  ) %>%
+  cache("cache/reason_model.rds", use_cache = TRUE)
+
+```
+
+
+## Model 3: Job and Major Groups
+
+```{r}
+#| label: more-groups
+
+groupless_model <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Education covariates
+    highest_degree +
+    # Job covariates
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +  # Log2, centered @ $60k, 2009 dollars
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id), # Random intercept for each person
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+  ) %>%
+  cache("cache/groupless_model.rds", use_cache = TRUE)
+ 
+groups_model <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Education covariates
+    highest_degree +
+    # Job covariates
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +  # Log2, centered @ $60k, 2009 dollars
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id) + # Random intercept for each person
+    (1 | major) +
+    (1 | job_type),
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+  ) %>%
+  cache("cache/groups_model.rds", use_cache = TRUE)
+
+
+anova(groupless_model, groups_model)
+
+```
+
+## Model 4: Does Salary Matter?
+
+Yes, yes it does. But how does that change based on major?
+
+```{r}
+data <- data %>% mutate(
+  salary_2009_trunc = ifelse(
+      test = salary < 150000 & salary > 20000, 
+      yes = salary * cpi_2009_conversion,
+      no = NA
+    ),
+  ) %>%
+  group_by(major) %>%
+  mutate(average_2009_salary_for_major = mean(salary_2009_trunc, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(
+    average_log2_salary_for_major = log2(average_2009_salary_for_major / 60000),
+    salary_log2_major_centered = replace_na(log2(salary_2009_trunc / average_2009_salary_for_major), 0)
+  )
+
+
+centered_salary <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Education covariates
+    highest_degree +
+    # Job covariates
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    average_log2_salary_for_major +  # Log2, centered @ $60k, 2009 dollars, average for major
+    salary_log2_major_centered +  # Log2, centered 0 @ average for major, 2009 dollars
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id) + # Random intercept for each person
+    (1 | major) +
+    (1 | job_type),
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+  ) %>%
+  cache("cache/centered_salary.rds", use_cache = TRUE)
+
+
+salary_slope <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Education covariates
+    highest_degree +
+    # Job covariates
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    average_log2_salary_for_major +  # Log2, centered @ $60k, 2009 dollars, average for major
+    salary_log2_major_centered +  # Log2, centered 0 @ average for major, 2009 dollars
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id) + # Random intercept for each person
+    # I can't add random slopes for rich & poor here, as it makes it singular
+    (1 + salary_log2_major_centered | major) +
+    (1 | job_type),
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+  ) %>%
+  cache("cache/salary_interaction.rds", use_cache = TRUE)
+
+anova(centered_salary, salary_slope)
+```
+
+## Main Model
+
+```{r}
+salary_job_slope <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Education covariates
+    highest_degree +
+    # Job covariates
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id) + # Random intercept for each person
+    # I can't add random slopes for rich & poor here, as it makes it singular
+    (1 | major) +
+    (1 + salary_adj | job_type),
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+  ) %>%
+  cache("cache/salary_job_slope.rds", use_cache = TRUE)
+
+main_model <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Education covariates
+    highest_degree +
+    # Job covariates
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    age:mismatch + # We want to see how the effect changes over time
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id) + # Random intercept for each person
+    # I can't add random slopes for rich & poor here, as it makes it singular
+    (1 + salary_adj | major) +
+    (1 + salary_adj | job_type),
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+  ) %>%
+  cache("cache/main_model.rds", use_cache = TRUE)
+
+
+main_model_ext <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Education covariates
+    highest_degree +
+    # Job covariates
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    age:mismatch + # We want to see how the effect changes over time
+    race +
+    survey_year +  # Centered around 2013
+    (1 + salary_adj | person_id) + # Random intercept for each person
+    # I can't add random slopes for rich & poor here, as it makes it singular
+    (1 + salary_adj | major) +
+    (1 + salary_adj | job_type),
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+  ) %>%
+  cache("cache/main_model_ext.rds", use_cache = TRUE)
+
+
+
+anova(model1, model2, model3, model35, salary_job_slope, main_model, main_model_ext)
+```
+
+## Model 5: Random Slope on Person
+
+```{r}
+# Added education covariates
+person_slope_model <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Education covariates
+    highest_degree +
+    major_group +
+    # Job covariates
+    job_type_group +
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +  # Log2, centered @ $60k, 2009 dollars
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    survey_year +  # Centered around 2013
+    (1 + salary_adj | person_id), # Random intercept for each person
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+) %>% cache("cache/person_slope_model", use_cache = TRUE)
+
+# This takes an age and a half to run.
+rand_pars_confints <-confint(person_slope_model, level = 0.99, parm = "theta_", method="profile") %>%
+  cache("cache/salary_randpars_confint.rds", use_cache = TRUE)
+
+  
+rand_pars_confints
+```
+
+
+## Model 6: CLMM
+
+```{r}
+#| label: clmm
+
+cl_data <- data %>%
+  mutate(
+    job_satis = as_factor(job_satis),
+  )
+
+model5_clmm <- ordinal::clmm(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Education covariates
+    highest_degree +
+    major_group +
+    # Job covariates
+    job_type_group +
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +  # Log2, centered @ $60k, 2009 dollars
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id), # Random intercept for each person
+  data = cl_data,
+  link = "logit",
+) %>% cache("cache/clmm_model.rds", use_cache = TRUE)
+```
+
+## Model 7: Over Time
+
+```{r}
+# Added education covariates
+age_model <- lmer(
+  job_satis ~ 1 +
+    # Main covariate
+    mismatch +
+    # Education covariates
+    highest_degree +
+    major_group +
+    # Job covariates
+    job_type_group +
+    weekly_hours +  # Centered around 36-40 hrs/wk
+    # Pay covariates
+    salary_adj +  # Log2, centered @ $60k, 2009 dollars
+    rich +  # Top 7.5% / $150k salary
+    poor +  # Bottom 7.5%
+    # Demographic
+    gender +
+    age +  # Decades around 25 years
+    mismatch:age +  # See if this changes
+    race +
+    survey_year +  # Centered around 2013
+    (1 | person_id), # Random intercept for each person
+  data = data,
+  control = lmerControl(optimizer = "bobyqa")
+) %>% cache("cache/age_model.rds", use_cache = FALSE)
+
+anova(model5, age_model)
+```
